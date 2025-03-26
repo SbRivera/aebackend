@@ -3,10 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const firebaseAdmin = require('firebase-admin');
-const path = require('path');
 
 // Inicializar Firebase
-const serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
+const serviceAccount = require('./firebase-config.json');
 
 firebaseAdmin.initializeApp({
   credential: firebaseAdmin.credential.cert(serviceAccount),
@@ -20,76 +19,56 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Lista local de registros
-let registros = [];
-
 // Mapeo de tipos esperados para el gráfico
 const tiposOrdenados = ['Plástico', 'Papel', 'Vidrio', 'Orgánico', 'Metal', 'No Reciclable'];
 
 // Ruta POST para recibir datos desde Arduino o frontend
-app.post('/api/datos', (req, res) => {
+app.post('/api/datos', async (req, res) => {
   const { tipo, cantidad } = req.body;
 
   if (!tipo || typeof cantidad !== 'number') {
     return res.status(400).send({ error: "Se requiere tipo y cantidad numérica" });
   }
 
-  const nuevoRegistro = {
-    tipo,
-    cantidad,
-    timestamp: new Date().toISOString()
-  };
+  try {
+    // Guardar en Firebase, reemplazando la cantidad anterior solo para ese tipo
+    const ref = db.ref(`sensor/data/${tipo}`);
+    await ref.set({ tipo, cantidad, timestamp: new Date().toISOString() });
 
-  // Guardar en Firebase
-  const ref = db.ref('sensor/data').push(); // push para múltiples entradas
-  ref.set(nuevoRegistro)
-    .then(() => {
-      // Guardar en memoria
-      registros.push(nuevoRegistro);
-      res.status(200).send({ message: "Datos recibidos correctamente" });
-    })
-    .catch((error) => {
-      console.error(error);
-      res.status(500).send({ error: "Error al guardar los datos en Firebase" });
-    });
+    res.status(200).send({ message: "Datos actualizados correctamente" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error al guardar los datos en Firebase" });
+  }
 });
 
-// Ruta GET para enviar datos al dashboard (agrupados)
-app.get('/api/datos', (req, res) => {
-  const wasteMap = {};
+// Ruta GET para obtener los datos almacenados
+app.get('/api/datos', async (req, res) => {
+  try {
+    const snapshot = await db.ref('sensor/data').once('value');
+    const datos = snapshot.val() || {};
 
-  // Sumar cantidades por tipo
-  registros.forEach(registro => {
-    if (!wasteMap[registro.tipo]) {
-      wasteMap[registro.tipo] = 0;
-    }
-    wasteMap[registro.tipo] += registro.cantidad;
-  });
+    // Construir arreglo ordenado para el dashboard
+    const wasteDistribution = tiposOrdenados.map(tipo => datos[tipo]?.cantidad || 0);
 
-  // Construir arreglo ordenado para el dashboard
-  const wasteDistribution = tiposOrdenados.map(tipo => wasteMap[tipo] || 0);
-
-  res.json({
-    wasteDistribution
-  });
+    res.json({ wasteDistribution });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error al obtener los datos" });
+  }
 });
 
-// Ruta para visualizar en HTML
-app.get('/visualizar', (req, res) => {
-  let html = `
-    <html>
-    <head><title>Datos del Sensor</title></head>
-    <body>
-      <h1>Registros del sensor</h1>
-      <table border="1"><tr><th>Tipo</th><th>Cantidad</th><th>Hora</th></tr>
-  `;
+// Ruta DELETE para eliminar un tipo de material específico
+app.delete('/api/datos/:tipo', async (req, res) => {
+  const { tipo } = req.params;
 
-  registros.forEach(dato => {
-    html += `<tr><td>${dato.tipo}</td><td>${dato.cantidad}</td><td>${dato.timestamp}</td></tr>`;
-  });
-
-  html += `</table></body></html>`;
-  res.send(html);
+  try {
+    await db.ref(`sensor/data/${tipo}`).remove();
+    res.status(200).send({ message: `Datos de ${tipo} eliminados correctamente` });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error al eliminar los datos" });
+  }
 });
 
 // Iniciar servidor
